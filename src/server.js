@@ -8,7 +8,7 @@ export function startServer() {
   app.use(express.urlencoded({ extended: false }))
 
   app.post('/robokassa/result', async (req, res) => {
-    const { OutSum, InvId, SignatureValue } = req.body
+    const { OutSum, InvId, SignatureValue, IsTest } = req.body
 
     if (!OutSum || !InvId || !SignatureValue) {
       console.error('Robokassa webhook: missing params', req.body)
@@ -16,7 +16,12 @@ export function startServer() {
       return
     }
 
-    const valid = verifyResultSignature({ outSum: OutSum, invId: InvId, signatureValue: SignatureValue })
+    const valid = verifyResultSignature({
+      outSum: OutSum,
+      invId: InvId,
+      signatureValue: SignatureValue,
+      isTest: IsTest === '1',
+    })
     if (!valid) {
       console.error(`Robokassa webhook: invalid signature for InvId=${InvId}`)
       res.status(400).send('bad sign')
