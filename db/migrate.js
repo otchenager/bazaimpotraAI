@@ -27,10 +27,13 @@ function logTargetDatabase() {
 
 async function migrate() {
   logTargetDatabase()
-  const sql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8')
-  await pool.query(sql)
-  console.log('Schema applied successfully.')
-  await pool.end()
+  try {
+    const sql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8')
+    await pool.query(sql)
+    console.log('Schema applied successfully.')
+  } finally {
+    await pool.end()
+  }
 }
 
 migrate().catch((err) => {
