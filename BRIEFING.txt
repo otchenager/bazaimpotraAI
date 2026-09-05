@@ -1,0 +1,139 @@
+BAZAIMPORTA tgbot briefing (as of 2026-09-05)
+================================================
+NOTE: this is a SEPARATE project from "AJ import" (frontend/ + backend/
+elsewhere in this same repo). tgbot/ is bazaimport.ru / @bazaimporta /
+"БАЗА ИМПОРТА" — a different brand that just happens to share this git
+repo. Package name and Vercel project are "bazaimporta-bot".
+
+CONTEXT
+-------
+Repo: C:\projects\WEB 2.0\cars\firstland (local git, branch main, no remote
+configured yet — repo is local-only, never pushed to GitHub). This repo
+already has an unrelated frontend/ (Vercel, live) and backend/ (Express +
+Prodamus, no DB — see root BRIEFING.txt/README.md for that flow, currently
+blocked on Railway billing per that briefing).
+
+tgbot/ is a NEW, SEPARATE Node subsystem for a Telegram bot
+(@bazaimporta_bot, built with grammy) that manages two channels:
+  - Free: "БАЗА ИМПОРТА" (@bazaimporta), chat.id = -1004466423272
+  - Closed/paid: "🔒БАЗА ИМПОРТА" (private, no username),
+    chat.id = -1004390971099
+
+NOTE: both chats logged as type=supergroup (not "channel") when the bot
+saw messages in them — i.e. these are likely Telegram GROUPS, not
+broadcast Channels. Not yet confirmed with the user whether that's
+intentional or a setup mistake (megaphone-icon Channel vs. two-people-icon
+Group). Doesn't block anything done so far (permission API is the same for
+both), but worth clarifying before building the real access-gating logic,
+since groups let members message each other while channels are
+broadcast-only.
+
+STATUS: diagnostics phase (get-chat-id + check-permissions) is DONE.
+Nothing in tgbot/ has been built beyond that yet — no Robokassa
+integration, no DB, no pin script, no persistent server.
+
+WHAT'S BUILT (tgbot/)
+----------------------
+- package.json — deps: grammy, dotenv. Scripts: `npm run get-chat-id`,
+  `npm run check-permissions`.
+- .env.example — blank template:
+    BOT_TOKEN=
+    FREE_CHANNEL_ID=
+    CLOSED_CHANNEL_ID=
+    ROBOKASSA_LOGIN=
+    ROBOKASSA_PASSWORD1=
+    ROBOKASSA_PASSWORD2=
+    ROBOKASSA_TEST=1
+    DATABASE_URL=
+- .env (gitignored, real values) — BOT_TOKEN filled in, FREE_CHANNEL_ID
+  and CLOSED_CHANNEL_ID filled in with the numeric IDs above. Robokassa
+  and DATABASE_URL still empty — not needed yet.
+- scripts/get-chat-id.js — long-polls the bot, logs chat.id/title/username
+  for every message/channel_post/my_chat_member update. Already used
+  successfully to resolve both channel IDs (see CONTEXT above). Can be
+  re-run if a third chat ever needs identifying, but not needed for now.
+- scripts/check-permissions.js — calls bot.api.getChatMember() and
+  reports ✅/❌. LAST RUN RESULT (confirmed working):
+    FREE_CHANNEL_ID   → status: administrator → ✅ can_pin_messages
+    CLOSED_CHANNEL_ID → status: administrator → ✅ can_invite_users
+  Both permissions are in place. No outstanding permission issues.
+
+RESOLVED ISSUES (for history, no action needed)
+-------------------------------------------------
+- User initially pasted the real BOT_TOKEN + channel links into
+  .env.example (not gitignored) instead of .env — fixed, moved to .env,
+  nothing was ever committed so no actual leak. Token rotation via
+  @BotFather /revoke was suggested as a precaution but left up to the
+  user — not done, not blocking anything.
+- Hit a 409 getUpdates conflict once from two get-chat-id.js instances
+  running simultaneously (assistant's background shell + user's own
+  terminal). Resolved by killing the duplicate; not an ongoing issue.
+- A few stray screenshot PNGs are sitting in tgbot/scripts/ (baza.png,
+  бот.png, a UUID-named png). Asked the user about deleting them —
+  user said leave them, so they're staying. Not part of the code.
+
+OPEN DECISION — discussed but NOT yet decided
+------------------------------------------------
+We talked through the path from "diagnostics done" to "actually working"
+and landed on these open questions, none committed to yet:
+
+1. Does the tgbot/Robokassa flow REPLACE the existing backend/ (Prodamus,
+   no-DB) flow, or run alongside it as a second/independent sales path?
+   This affects whether backend/ becomes dead code and whether we reuse
+   its existing tariffs (1/3/6 month — 4900₽/12900₽/22900₽).
+2. Database choice for DATABASE_URL — needed because this bot must
+   persist subscription state (who paid, which tariff, expiry date) that
+   Telegram itself doesn't track. Postgres (Railway or Neon) was
+   suggested, not chosen yet.
+3. Hosting/deploy strategy — discussed Docker vs. no Docker: recommended
+   AGAINST adding a Dockerfile for now (Railway's Nixpacks auto-build
+   already works, Docker adds maintenance with no current concrete need).
+   Also discussed Railway-via-GitHub vs. `railway up` CLI deploys:
+   recommended GitHub-connected Railway (auto-deploy on push, deploy
+   history, rollbacks) over CLI deploy — but this repo has NO GitHub
+   remote yet, so that means setting one up first. User has not yet said
+   go-ahead on creating/pushing to GitHub.
+   Also note: backend/ is separately blocked on Railway billing (see root
+   BRIEFING.txt) — worth checking if that's resolved before assuming
+   Railway is immediately usable for tgbot/ too.
+
+None of the above has been implemented — this was a planning discussion
+only. User said they'll come back tomorrow to continue.
+
+FULL PLAN once decisions above are made (in order)
+------------------------------------------------------
+1. Pick DB + provision it, set DATABASE_URL.
+2. Get real Robokassa merchant credentials (ROBOKASSA_LOGIN/PASSWORD1/
+   PASSWORD2), start with ROBOKASSA_TEST=1.
+3. Build payment flow: /start in bot → pick tariff → generate signed
+   Robokassa payment link → user pays → Robokassa hits our ResultURL
+   webhook → verify signature → write subscription to DB → bot calls
+   createChatInviteLink() for the closed channel (single-use) → DM it to
+   the user.
+4. Build an expiry job (scheduled) that finds lapsed subscriptions and
+   removes the user from the closed channel (banChatMember +
+   unbanChatMember, so it's a removal not a permanent ban).
+5. Use the already-verified can_pin_messages to auto-pin a promo/join
+   post in the free channel (pin script, mentioned as a later step,
+   not built).
+6. Decide GitHub + Railway deploy setup (see OPEN DECISION #3) and get
+   the bot running persistently (long polling or webhook), not just as a
+   one-off diagnostic script.
+
+NOT STARTED
+-------------
+- Robokassa payment integration (order creation, signature verification,
+  webhook handling).
+- Any DATABASE_URL / actual database wiring.
+- The pin-message script.
+- Actually granting/revoking channel access based on payment status.
+- GitHub remote setup / Railway deploy for tgbot/.
+- Committing tgbot/ to git — nothing here has been committed yet
+  (currently fully untracked; `git status` shows tgbot/ as one untracked
+  directory).
+
+To resume in a new chat: paste this file's contents, or just say
+"continue the tgbot work" and point Claude at
+C:\projects\WEB 2.0\cars\firstland\tgbot\. The first thing to settle is
+OPEN DECISION #1 (replace vs. run alongside backend/) since it shapes
+everything else.

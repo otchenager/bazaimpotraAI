@@ -1,0 +1,22 @@
+{
+  "name": "bazaimporta-bot",
+  "version": "1.0.0",
+  "description": "БАЗА ИМПОРТА Telegram bot (@bazaimporta_bot, bazaimport.ru): channel diagnostics + Robokassa payment flow",
+  "type": "module",
+  "private": true,
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "get-chat-id": "node scripts/get-chat-id.js",
+    "check-permissions": "node scripts/check-permissions.js",
+    "db:migrate": "node db/migrate.js"
+  },
+  "license": "ISC",
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "grammy": "^1.30.0",
+    "node-cron": "^3.0.3",
+    "pg": "^8.13.0"
+  }
+}
