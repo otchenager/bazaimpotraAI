@@ -26,6 +26,7 @@ function logTargetDatabase() {
 }
 
 async function migrate() {
+  console.log('Migration script version: manual-connection-config-fix')
   logTargetDatabase()
   try {
     const sql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8')
