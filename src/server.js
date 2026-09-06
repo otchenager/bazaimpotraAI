@@ -10,6 +10,12 @@ export function startServer() {
   app.post('/robokassa/result', async (req, res) => {
     const { OutSum, InvId, SignatureValue, IsTest } = req.body
 
+    console.log(
+      `Robokassa webhook received: InvId=${InvId}, OutSum=${OutSum}, IsTest=${
+        IsTest !== undefined ? IsTest : 'not present'
+      }`
+    )
+
     if (!OutSum || !InvId || !SignatureValue) {
       console.error('Robokassa webhook: missing params', req.body)
       res.status(400).send('bad request')
@@ -23,10 +29,11 @@ export function startServer() {
       isTest: IsTest === '1',
     })
     if (!valid) {
-      console.error(`Robokassa webhook: invalid signature for InvId=${InvId}`)
+      console.error(`Signature check: FAILED for InvId=${InvId}`)
       res.status(400).send('bad sign')
       return
     }
+    console.log(`Signature check: PASSED for InvId=${InvId}`)
 
     try {
       const { rows } = await pool.query(
@@ -39,10 +46,11 @@ export function startServer() {
       const subscription = rows[0]
 
       if (!subscription) {
-        console.error(`Robokassa webhook: subscription ${InvId} not found`)
+        console.error(`Subscription not found for InvId=${InvId}`)
         res.status(400).send('unknown InvId')
         return
       }
+      console.log(`Subscription found for InvId=${InvId}, status=${subscription.status}`)
 
       // Robokassa retries the webhook until it gets OK{InvId} — if we've
       // already processed this payment, just re-acknowledge without
@@ -71,9 +79,16 @@ export function startServer() {
         }
       }
 
-      const inviteLink = await bot.api.createChatInviteLink(process.env.CLOSED_CHANNEL_ID, {
-        member_limit: 1,
-      })
+      let inviteLink
+      try {
+        inviteLink = await bot.api.createChatInviteLink(process.env.CLOSED_CHANNEL_ID, {
+          member_limit: 1,
+        })
+        console.log(`Invite link created for InvId=${InvId}`)
+      } catch (inviteErr) {
+        console.error(`Invite link creation FAILED for InvId=${InvId}:`, inviteErr)
+        throw inviteErr
+      }
 
       await pool.query(
         `UPDATE subscriptions
