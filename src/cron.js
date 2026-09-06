@@ -4,7 +4,7 @@ import { bot } from './bot.js'
 
 export function startCronJobs() {
   cron.schedule('0 3 * * *', runExpiryCheck) // daily 03:00
-  cron.schedule('0 9 1 * *', runMonthlyPayoutReport) // 1st of month, 09:00
+  cron.schedule('0 9 * * 1', runWeeklyPayoutReport) // every Monday, 09:00
 }
 
 async function runExpiryCheck() {
@@ -34,15 +34,17 @@ async function runExpiryCheck() {
   }
 }
 
-async function runMonthlyPayoutReport() {
+async function runWeeklyPayoutReport() {
   try {
     const now = new Date()
-    const periodStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1))
-    const periodEndExclusive = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
+    // Window is the 7 days that just closed: last Monday 00:00 UTC (inclusive)
+    // through this Monday 00:00 UTC (exclusive).
+    const periodEndExclusive = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
+    const periodStart = new Date(periodEndExclusive.getTime() - 7 * 24 * 60 * 60 * 1000)
     const periodEnd = new Date(periodEndExclusive.getTime() - 24 * 60 * 60 * 1000)
 
     const { rows } = await pool.query(
-      `SELECT s.promo_code, p.owner_name, p.owner_telegram_id, SUM(s.commission_amount) AS total
+      `SELECT s.promo_code, p.owner_name, p.owner_telegram_id, COUNT(*) AS count, SUM(s.commission_amount) AS total
        FROM subscriptions s
        JOIN promo_codes p ON p.code = s.promo_code
        WHERE s.status = 'paid'
@@ -54,24 +56,70 @@ async function runMonthlyPayoutReport() {
     )
 
     if (rows.length === 0) {
-      console.log('Monthly payout report: no commissions to report for previous month.')
+      console.log('Weekly payout report: no commissions to report for the past week.')
       return
     }
 
-    const lines = ['Отчёт по выплатам за прошлый месяц:']
+    const reportBlocks = []
     for (const row of rows) {
       await pool.query(
         `INSERT INTO payouts (promo_code, period_start, period_end, total_amount, status)
          VALUES ($1, $2, $3, $4, 'pending')`,
         [row.promo_code, periodStart.toISOString().slice(0, 10), periodEnd.toISOString().slice(0, 10), row.total]
       )
-      lines.push(`${row.promo_code} (${row.owner_name ?? row.owner_telegram_id}) — ₽${Number(row.total).toFixed(2)}`)
+
+      const total = Number(row.total)
+      if (total > 0) {
+        reportBlocks.push(
+          `Owner telegram_id: ${row.owner_telegram_id}\nPromo code: ${row.promo_code}\nOwed this week: ₽${total.toFixed(2)}`
+        )
+      }
     }
 
-    if (process.env.ADMIN_TELEGRAM_ID) {
-      await bot.api.sendMessage(process.env.ADMIN_TELEGRAM_ID, lines.join('\n'))
+    if (reportBlocks.length > 0 && process.env.ADMIN_TELEGRAM_ID) {
+      await sendChunked(process.env.ADMIN_TELEGRAM_ID, reportBlocks.join('\n\n'))
+    }
+
+    for (const row of rows) {
+      const total = Number(row.total)
+      const count = Number(row.count)
+      if (total <= 0) continue
+
+      try {
+        await bot.api.sendMessage(
+          row.owner_telegram_id,
+          `BAZAIMPORTA ставит в известность — «ДЕНЬ ВЫПЛАТ!»\n\n` +
+            `Благодаря вашей работе мы получили ${count} подписок на закрытый Telegram-канал, а вы заработали ${total.toFixed(2)} рублей.\n\n` +
+            `Спасибо за доверие!`
+        )
+      } catch (err) {
+        console.error(
+          `Weekly payout report: failed to notify owner_telegram_id=${row.owner_telegram_id} for promo_code=${row.promo_code}:`,
+          err.message
+        )
+      }
     }
   } catch (err) {
-    console.error('Monthly payout cron failed:', err)
+    console.error('Weekly payout cron failed:', err)
   }
+}
+
+async function sendChunked(chatId, text, maxLen = 4096) {
+  if (text.length <= maxLen) {
+    await bot.api.sendMessage(chatId, text)
+    return
+  }
+
+  const blocks = text.split('\n\n')
+  let chunk = ''
+  for (const block of blocks) {
+    const candidate = chunk ? `${chunk}\n\n${block}` : block
+    if (candidate.length > maxLen) {
+      if (chunk) await bot.api.sendMessage(chatId, chunk)
+      chunk = block
+    } else {
+      chunk = candidate
+    }
+  }
+  if (chunk) await bot.api.sendMessage(chatId, chunk)
 }
