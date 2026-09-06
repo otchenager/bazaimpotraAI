@@ -22,6 +22,15 @@ function isAdmin(ctx) {
   )
 }
 
+const RU_MONTHS_GENITIVE = [
+  'января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
+  'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря',
+]
+
+function formatRussianDate(date) {
+  return `${date.getDate()} ${RU_MONTHS_GENITIVE[date.getMonth()]} ${date.getFullYear()}`
+}
+
 async function showTariffs(ctx) {
   const { rows: tariffs } = await pool.query(
     'SELECT * FROM tariffs WHERE active = true ORDER BY duration_days ASC'
@@ -42,15 +51,18 @@ async function showTariffs(ctx) {
       discountRate > 0
         ? `${finalPrice.toFixed(0)}₽ (было ${base.toFixed(0)}₽)`
         : `${finalPrice.toFixed(0)}₽`
-    lines.push(`${tariff.code}: ${priceLine} — ${tariff.duration_days} дней`)
-    keyboard.text(`Оплатить (${tariff.code})`, `pay:${tariff.code}`).row()
+    const displayName = tariff.display_name ?? tariff.code
+    const accessUntil = new Date()
+    accessUntil.setDate(accessUntil.getDate() + tariff.duration_days)
+
+    lines.push(
+      `${displayName}: ${priceLine} — ${tariff.duration_days} дней\n` +
+        `Доступ будет предоставлен до ${formatRussianDate(accessUntil)}`
+    )
+    keyboard.text('ПРИОБРЕСТИ ДОСТУП', `pay:${tariff.code}`).row()
   }
 
-  if (!ctx.session.promoCode) {
-    keyboard.text('Ввести промокод', 'enter_promo')
-  }
-
-  await ctx.reply(lines.join('\n'), { reply_markup: keyboard })
+  await ctx.reply(lines.join('\n\n'), { reply_markup: keyboard })
 }
 
 bot.command('start', async (ctx) => {
@@ -59,6 +71,9 @@ bot.command('start', async (ctx) => {
   ctx.session.discountRate = 0
   ctx.session.awaitingPromo = false
 
+  await ctx.reply('Привет!\n\nМеня зовут Борис, я путеводитель до закрытой базы импорта!')
+
+  let hasValidPayloadPromo = false
   if (payload) {
     const { rows } = await pool.query(
       'SELECT * FROM promo_codes WHERE code = $1 AND active = true',
@@ -67,18 +82,34 @@ bot.command('start', async (ctx) => {
     if (rows.length) {
       ctx.session.promoCode = rows[0].code
       ctx.session.discountRate = Number(rows[0].discount_rate)
+      hasValidPayloadPromo = true
     }
-    // invalid/inactive promo code: ignore silently, proceed as normal
+    // invalid/inactive promo code: ignore silently, fall through to the
+    // manual promo prompt below, same as a plain /start with no payload.
   }
 
-  await ctx.reply('Добро пожаловать в БАЗА ИМПОРТА!')
-  await showTariffs(ctx)
+  if (hasValidPayloadPromo) {
+    await showTariffs(ctx)
+    return
+  }
+
+  await ctx.reply('ВВЕДИТЕ УНИКАЛЬНЫЙ ПРОМОКОД', {
+    reply_markup: new InlineKeyboard()
+      .text('Ввести промокод', 'enter_promo')
+      .row()
+      .text('Продолжить без промокода', 'skip_promo'),
+  })
 })
 
 bot.callbackQuery('enter_promo', async (ctx) => {
   await ctx.answerCallbackQuery()
   ctx.session.awaitingPromo = true
   await ctx.reply('Введите промокод:')
+})
+
+bot.callbackQuery('skip_promo', async (ctx) => {
+  await ctx.answerCallbackQuery()
+  await showTariffs(ctx)
 })
 
 bot.callbackQuery(/^pay:(.+)$/, async (ctx) => {

@@ -5,9 +5,11 @@ CREATE TABLE IF NOT EXISTS tariffs (
   active BOOLEAN DEFAULT true
 );
 
-INSERT INTO tariffs (code, amount, duration_days, active)
-VALUES ('1_month', 4990, 30, true)
-ON CONFLICT (code) DO NOTHING;
+ALTER TABLE tariffs ADD COLUMN IF NOT EXISTS display_name TEXT;
+
+INSERT INTO tariffs (code, amount, duration_days, active, display_name)
+VALUES ('1_month', 4990, 30, true, '1 месяц')
+ON CONFLICT (code) DO UPDATE SET display_name = EXCLUDED.display_name;
 
 CREATE TABLE IF NOT EXISTS promo_codes (
   code TEXT PRIMARY KEY,
