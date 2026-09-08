@@ -90,15 +90,42 @@ export function startServer() {
         throw inviteErr
       }
 
+      // Renewal: if this telegram_id already has a paid subscription whose
+      // access hasn't run out yet, stack the new period on top of it instead
+      // of starting a fresh period from today. The current row is still
+      // 'pending' at this point, so filtering on status = 'paid' naturally
+      // excludes it.
+      const { rows: maxExpiryRows } = await pool.query(
+        `SELECT MAX(expires_at) AS max_expires_at
+         FROM subscriptions
+         WHERE telegram_id = $1 AND status = 'paid'`,
+        [subscription.telegram_id]
+      )
+      const now = new Date()
+      const existingExpiresAt = maxExpiryRows[0]?.max_expires_at
+        ? new Date(maxExpiryRows[0].max_expires_at)
+        : null
+      const isRenewal = existingExpiresAt != null && existingExpiresAt > now
+      const renewalBase = isRenewal ? existingExpiresAt : now
+      console.log(
+        `InvId=${InvId}: ${isRenewal ? 'renewal, stacking on existing expires_at' : 'fresh period from now'}`
+      )
+
       await pool.query(
         `UPDATE subscriptions
          SET status = 'paid',
              paid_at = now(),
-             expires_at = now() + ($2 * INTERVAL '1 day'),
-             commission_amount = $3,
-             invite_link = $4
+             expires_at = $2::timestamptz + ($3 * INTERVAL '1 day'),
+             commission_amount = $4,
+             invite_link = $5
          WHERE id = $1`,
-        [InvId, subscription.duration_days, commissionAmount, inviteLink.invite_link]
+        [
+          InvId,
+          renewalBase.toISOString(),
+          subscription.duration_days,
+          commissionAmount,
+          inviteLink.invite_link,
+        ]
       )
 
       await bot.api.sendMessage(

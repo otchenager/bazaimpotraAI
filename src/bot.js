@@ -15,7 +15,6 @@ bot.use(
       promoCode: null,
       discountRate: 0,
       awaitingPromo: false,
-      awaitingPartnerCode: false,
     }),
   })
 )
@@ -43,6 +42,7 @@ const MENU_CHANNEL_INFO = '🔒 Закрытая база'
 const MENU_AUDIENCE = '🎓 Для кого курс'
 const MENU_SUBSCRIPTION = '📊 Моя подписка'
 const MENU_PARTNER = '🤝 Стать партнёром'
+const MENU_BALANCE = '💰 Мой баланс'
 const MENU_FREE_CHANNEL = '📚 Бесплатный канал'
 const MENU_QUESTION = '💬 Задать вопрос'
 
@@ -53,10 +53,31 @@ const mainMenuKeyboard = new Keyboard()
   .text(MENU_AUDIENCE).row()
   .text(MENU_SUBSCRIPTION).row()
   .text(MENU_PARTNER).row()
+  .text(MENU_BALANCE).row()
   .text(MENU_FREE_CHANNEL).row()
   .text(MENU_QUESTION).row()
   .resized()
   .persistent()
+
+// Mirrors the renewal logic in the Robokassa webhook (src/server.js): if the
+// user already has a paid subscription whose access hasn't run out yet, the
+// previewed end date stacks on top of it instead of starting from today, so
+// the preview matches what they'll actually get after paying.
+async function computeAccessUntil(telegramId, durationDays) {
+  const { rows } = await pool.query(
+    `SELECT MAX(expires_at) AS max_expires_at
+     FROM subscriptions
+     WHERE telegram_id = $1 AND status = 'paid'`,
+    [telegramId]
+  )
+  const now = new Date()
+  const existingExpiresAt = rows[0]?.max_expires_at ? new Date(rows[0].max_expires_at) : null
+  const base = existingExpiresAt && existingExpiresAt > now ? existingExpiresAt : now
+
+  const accessUntil = new Date(base)
+  accessUntil.setDate(accessUntil.getDate() + durationDays)
+  return accessUntil
+}
 
 async function showTariffs(ctx) {
   const { rows: tariffs } = await pool.query(
@@ -79,8 +100,7 @@ async function showTariffs(ctx) {
         ? `${finalPrice.toFixed(0)}₽ (было ${base.toFixed(0)}₽)`
         : `${finalPrice.toFixed(0)}₽`
     const displayName = tariff.display_name ?? tariff.code
-    const accessUntil = new Date()
-    accessUntil.setDate(accessUntil.getDate() + tariff.duration_days)
+    const accessUntil = await computeAccessUntil(ctx.from.id, tariff.duration_days)
 
     lines.push(
       `${displayName}: ${priceLine} — ${tariff.duration_days} дней\n` +
@@ -117,7 +137,6 @@ bot.command('start', async (ctx) => {
   ctx.session.promoCode = null
   ctx.session.discountRate = 0
   ctx.session.awaitingPromo = false
-  ctx.session.awaitingPartnerCode = false
 
   if (payload) {
     const { rows } = await pool.query(
@@ -277,13 +296,51 @@ bot.hears(MENU_SUBSCRIPTION, async (ctx) => {
 })
 
 bot.hears(MENU_PARTNER, async (ctx) => {
-  ctx.session.awaitingPartnerCode = true
   await ctx.reply(
-    'Хочешь стать партнёром BAZAIMPORTA?\n\n' +
-      'Ты можешь сам создать свой уникальный промокод и получать 25% с каждой продажи, а твои клиенты получат скидку 10%.\n\n' +
-      'Напиши, какой промокод хочешь использовать (одно слово латиницей, без пробелов и спецсимволов).\n\n' +
-      'Свой Telegram ID (на всякий случай, если понадобится) можно узнать у @userinfobot.'
+    'Хочешь стать партнёром BAZA IMPORT?\n\n' +
+      'Напиши @visagevvvv для получения промокода, и получай 25% с привлечённого клиента!'
   )
+})
+
+bot.hears(MENU_BALANCE, async (ctx) => {
+  const { rows: promoCodes } = await pool.query(
+    'SELECT code FROM promo_codes WHERE owner_telegram_id = $1',
+    [ctx.from.id]
+  )
+
+  if (promoCodes.length === 0) {
+    await ctx.reply('У тебя пока нет промокода. Чтобы стать партнёром, напиши @visagevvvv.')
+    return
+  }
+
+  const blocks = []
+  for (const { code } of promoCodes) {
+    const { rows: earnedRows } = await pool.query(
+      `SELECT COALESCE(SUM(commission_amount), 0) AS total
+       FROM subscriptions
+       WHERE promo_code = $1 AND status = 'paid'`,
+      [code]
+    )
+    const { rows: paidRows } = await pool.query(
+      `SELECT COALESCE(SUM(total_amount), 0) AS total
+       FROM payouts
+       WHERE promo_code = $1 AND status = 'paid'`,
+      [code]
+    )
+
+    const totalEarned = Number(earnedRows[0].total)
+    const alreadyPaid = Number(paidRows[0].total)
+    const pending = totalEarned - alreadyPaid
+
+    blocks.push(
+      `Твой промокод: ${code}\n\n` +
+        `Всего заработано: ₽${totalEarned.toFixed(2)}\n` +
+        `Уже выплачено: ₽${alreadyPaid.toFixed(2)}\n` +
+        `Ожидает выплаты: ₽${pending.toFixed(2)}`
+    )
+  }
+
+  await ctx.reply(blocks.join('\n\n—\n\n'))
 })
 
 bot.hears(MENU_FREE_CHANNEL, async (ctx) => {
@@ -362,47 +419,10 @@ bot.command('markpaid', async (ctx) => {
   )
 })
 
-async function handlePartnerCodeSubmission(ctx) {
-  const code = ctx.message.text.trim().toUpperCase()
-
-  if (!code || !/^[A-Za-z0-9_-]+$/.test(code)) {
-    await ctx.reply(
-      'Промокод может содержать только латинские буквы, цифры, - и _.\nПопробуй другой вариант.'
-    )
-    return
-  }
-
-  const { rows: existing } = await pool.query('SELECT code FROM promo_codes WHERE code = $1', [code])
-  if (existing.length) {
-    await ctx.reply('Этот промокод уже занят, выбери другой')
-    return // stay in the awaitingPartnerCode state so they can retry
-  }
-
-  await pool.query(
-    `INSERT INTO promo_codes (code, owner_telegram_id, commission_rate, discount_rate, active)
-     VALUES ($1, $2, 0.25, 0.1, true)`,
-    [code, ctx.from.id]
-  )
-
-  ctx.session.awaitingPartnerCode = false
-
-  await ctx.reply(
-    `Готово! Твой промокод: ${code}\n\n` +
-      `Делись этой ссылкой:\n` +
-      `https://t.me/bazaimporta_bot?start=${code}\n\n` +
-      `За каждую продажу по этому коду ты получишь 25% комиссии, а твой клиент — скидку 10%.`
-  )
-}
-
-// Must be registered last: catches free-text entry for the manual promo
-// code flow and the self-service partner code flow. Commands and hears()
-// matches above are matched first, so this never intercepts them.
+// Must be registered last: catches free-text promo code entry after
+// "Ввести промокод" is pressed. Commands and hears() matches above are
+// matched first, so this never intercepts them.
 bot.on('message:text', async (ctx) => {
-  if (ctx.session.awaitingPartnerCode) {
-    await handlePartnerCodeSubmission(ctx)
-    return
-  }
-
   if (!ctx.session.awaitingPromo) return
 
   ctx.session.awaitingPromo = false
